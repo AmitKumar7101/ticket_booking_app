@@ -3,6 +3,10 @@ from typing import Optional
 from jose import jwt
 from passlib.context import CryptContext
 
+
+
+
+
 # JWT Configuration constants
 # In production, ensure SECRET_KEY is loaded securely from environment variables (.env)
 SECRET_KEY = "your-super-secret-key-for-ticket-booking"
