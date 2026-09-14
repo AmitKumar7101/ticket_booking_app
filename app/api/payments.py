@@ -91,6 +91,70 @@ async def create_order(
         key_id=RAZORPAY_KEY_ID,
     )
 
+async def finalize_successful_payment(
+    db: AsyncSession,
+    redis_client: redis.Redis,
+    payment: Payment,
+) -> Booking | None:
+    """
+    Shared finalization logic used by both /verify and the webhook.
+
+    Marks the payment paid and creates the Booking, but is safe to call
+    more than once for the same payment (idempotent) and safe to call
+    from a genuine race between /verify and the webhook.
+
+    Returns the Booking on success, or None if the seat was genuinely
+    booked under a DIFFERENT payment in the meantime (real conflict).
+    """
+    # Idempotency: this payment is already fully processed.
+    if payment.status == PaymentStatus.paid:
+        existing = await db.execute(
+            select(Booking).where(Booking.payment_id == payment.id)
+        )
+        return existing.scalar_one_or_none()
+
+    # Idempotency: did THIS payment already produce a booking (e.g. webhook
+    # got here first) even though the status field hasn't caught up yet?
+    own = await db.execute(
+        select(Booking).where(Booking.payment_id == payment.id)
+    )
+    own_booking = own.scalar_one_or_none()
+    if own_booking:
+        payment.status = PaymentStatus.paid
+        await db.commit()
+        return own_booking
+
+    # Real conflict: the seat is booked, but under a DIFFERENT payment.
+    conflict = await db.execute(
+        select(Booking).where(
+            Booking.event_id == payment.event_id,
+            Booking.seat_id == payment.seat_id,
+            Booking.status == SeatStatus.booked,
+        )
+    )
+    if conflict.scalar_one_or_none():
+        payment.status = PaymentStatus.failed
+        await db.commit()
+        return None
+
+    # Happy path: mark paid and create the booking.
+    payment.status = PaymentStatus.paid
+    new_booking = Booking(
+        user_id=payment.user_id,
+        event_id=payment.event_id,
+        seat_id=payment.seat_id,
+        payment_id=payment.id,
+        status=SeatStatus.booked,
+    )
+    db.add(new_booking)
+    await db.commit()
+    await db.refresh(new_booking)
+
+    lock_key = f"seat_lock:{payment.event_id}:{payment.seat_id}"
+    await redis_client.delete(lock_key)
+
+    return new_booking
+
 
 @router.post("/verify", status_code=status.HTTP_200_OK)
 async def verify_payment(
@@ -112,10 +176,20 @@ async def verify_payment(
         raise HTTPException(status_code=404, detail="Payment order not found.")
     if payment.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not your payment.")
-    if payment.status == PaymentStatus.paid:
-        raise HTTPException(status_code=400, detail="Payment already verified.")
 
-    # 2. Verify the signature — this is THE critical security step.
+    # If the webhook already finalized this payment before we got here,
+    # don't error - just return the existing booking (idempotent success).
+    if payment.status == PaymentStatus.paid:
+        existing_booking = await db.execute(
+            select(Booking).where(Booking.payment_id == payment.id)
+        )
+        existing_booking = existing_booking.scalar_one_or_none()
+        return {
+            "message": "Payment already verified and booking confirmed.",
+            "booking_id": existing_booking.id if existing_booking else None,
+        }
+
+    # 2. Verify the signature - this is THE critical security step.
     #    It proves the payment_id genuinely came from Razorpay for this order,
     #    not from someone forging a request to your API.
     try:
@@ -129,47 +203,28 @@ async def verify_payment(
         await db.commit()
         raise HTTPException(status_code=400, detail="Payment signature verification failed.")
 
-    # 3. Signature is valid — mark payment as paid
-    payment.status = PaymentStatus.paid
+    # 3. Signature is valid - record the payment id, then delegate to the
+    #    shared finalizer (also used by the webhook) to avoid duplicating
+    #    the booking-creation / conflict-check logic.
     payment.razorpay_payment_id = verify_in.razorpay_payment_id
-    await db.flush()
 
-    # 4. Double-check the seat wasn't booked by someone else in the meantime
-    existing = await db.execute(
-        select(Booking).where(
-            Booking.event_id == payment.event_id,
-            Booking.seat_id == payment.seat_id,
-            Booking.status == SeatStatus.booked,
-        )
-    )
-    if existing.scalar_one_or_none():
-        await db.commit()
+    booking = await finalize_successful_payment(db, redis_client, payment)
+
+    if booking is None:
         raise HTTPException(
             status_code=409,
             detail="Seat was booked by someone else. Contact support for a refund."
         )
 
-    # 5. NOW create the actual booking (only reachable after real payment)
-    new_booking = Booking(
-        user_id=current_user.id,
-        event_id=payment.event_id,
-        seat_id=payment.seat_id,
-        payment_id=payment.id,
-        status=SeatStatus.booked,
-    )
-    db.add(new_booking)
-    await db.commit()
-    await db.refresh(new_booking)
-
-    # 6. Release the Redis seat lock — no longer needed
-    lock_key = f"seat_lock:{payment.event_id}:{payment.seat_id}"
-    await redis_client.delete(lock_key)
-
-    return {"message": "Payment verified and booking confirmed.", "booking_id": new_booking.id}
+    return {"message": "Payment verified and booking confirmed.", "booking_id": booking.id}
 
 
 @router.post("/webhook", status_code=status.HTTP_200_OK)
-async def razorpay_webhook(request: Request):
+async def razorpay_webhook(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    redis_client: redis.Redis = Depends(get_redis),
+):
     """
     Step 3 (safety net): Razorpay calls this server-to-server whenever a
     payment event happens, independent of whether the frontend called /verify.
@@ -190,10 +245,29 @@ async def razorpay_webhook(request: Request):
 
     payload = json.loads(body)
     event_type = payload.get("event")
+    entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
+    order_id = entity.get("order_id")
 
-    # You can log/handle events here — e.g. auto-mark Payment as failed
-    # if a payment.failed event arrives, even if /verify was never called.
-    # Kept minimal here since /verify handles the main happy path.
-    print(f"Received Razorpay webhook event: {event_type}")
+    # Always return 200 for events we deliberately skip - Razorpay retries
+    # with backoff on non-2xx responses, and we don't want retry storms.
+    if not order_id:
+        return {"status": "ignored"}
+
+    result = await db.execute(
+        select(Payment).where(Payment.razorpay_order_id == order_id)
+    )
+    payment = result.scalar_one_or_none()
+    if not payment:
+        return {"status": "ignored"}
+
+    if event_type == "payment.captured":
+        payment.razorpay_payment_id = entity.get("id")
+        await finalize_successful_payment(db, redis_client, payment)
+
+    elif event_type == "payment.failed" and payment.status == PaymentStatus.created:
+        payment.status = PaymentStatus.failed
+        await db.commit()
+        lock_key = f"seat_lock:{payment.event_id}:{payment.seat_id}"
+        await redis_client.delete(lock_key)
 
     return {"status": "ok"}
