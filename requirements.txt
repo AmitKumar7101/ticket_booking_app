@@ -9,3 +9,7 @@ bcrypt==4.3.0
 redis
 razorpay
 dotenv
+celery
+qrcode[pil]
+reportlab
+tzdata

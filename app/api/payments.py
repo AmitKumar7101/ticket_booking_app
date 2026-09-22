@@ -17,6 +17,9 @@ from app.models.core_models import (
     User, Event, Seat, Booking, SeatStatus, Payment, PaymentStatus
 )
 from app.schemas.payments import PaymentOrderCreate, PaymentOrderOut, PaymentVerify
+from app.services.ticket_queue import enqueue_ticket_email
+
+
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
 
@@ -153,7 +156,13 @@ async def finalize_successful_payment(
     lock_key = f"seat_lock:{payment.event_id}:{payment.seat_id}"
     await redis_client.delete(lock_key)
 
+    # Hand the heavy work (PDF + QR + email) to the Celery worker. Never raises:
+    # if RabbitMQ is down the sweeper re-queues this booking later.
+    await enqueue_ticket_email(new_booking.id)
+
     return new_booking
+
+
 
 
 @router.post("/verify", status_code=status.HTTP_200_OK)

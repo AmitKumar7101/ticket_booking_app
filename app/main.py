@@ -7,6 +7,7 @@ from app.api import admin, bookings, events,payments
 from app.seed_admin import create_super_admin
 from app.core.redis import init_redis, close_redis
 from contextlib import asynccontextmanager
+from app.api import admin, bookings, events, payments, tickets   # add `tickets`
 
 
 @asynccontextmanager
@@ -32,6 +33,7 @@ app.include_router(admin.router)
 app.include_router(events.router)
 app.include_router(bookings.router)
 app.include_router(payments.router)
+app.include_router(tickets.router) 
 
 @app.get("/")
 async def root():

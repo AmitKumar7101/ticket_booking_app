@@ -1,3 +1,4 @@
+import uuid
 from sqlalchemy import String, Integer, ForeignKey, DateTime, Float, Enum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -44,6 +45,10 @@ class SeatStatus(str, enum.Enum):
     available = "available"
     booked = "booked"
 
+class TicketStatus(str, enum.Enum):
+    pending = "pending"   # booking confirmed, ticket email not sent yet
+    sent = "sent"         # PDF generated and emailed
+    failed = "failed"     # gave up after all retries (can be re-sent manually)
 # --- Models ---
 class User(Base):
     __tablename__ = "users"
@@ -86,7 +91,7 @@ class Seat(Base):
 
 class Booking(Base):
     __tablename__ = "bookings"
-    
+
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     event_id: Mapped[int] = mapped_column(ForeignKey("events.id"))
@@ -94,6 +99,19 @@ class Booking(Base):
     payment_id: Mapped[int] = mapped_column(ForeignKey("payments.id"))  # NEW
 
     status: Mapped[SeatStatus] = mapped_column(Enum(SeatStatus), default=SeatStatus.available)
+
+    # --- ticket delivery tracking (async task processing) ---
+    ticket_code: Mapped[str] = mapped_column(
+        String(36), unique=True, index=True, default=lambda: str(uuid.uuid4())
+    )
+    ticket_status: Mapped[TicketStatus] = mapped_column(
+        Enum(TicketStatus),
+        default=TicketStatus.pending,
+        server_default=TicketStatus.pending.value,
+    )
+    ticket_queued_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    ticket_sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
     booked_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc)
