@@ -6,6 +6,8 @@ from app.api import admin, bookings, events,payments
 
 from app.seed_admin import create_super_admin
 from app.core.redis import init_redis, close_redis
+from app.core.rate_limit import TokenBucket
+from app.core.config import TRUST_X_FORWARDED_FOR
 from contextlib import asynccontextmanager
 from app.api import admin, bookings, events, payments, tickets   # add `tickets`
 
@@ -14,6 +16,12 @@ from app.api import admin, bookings, events, payments, tickets   # add `tickets`
 async def lifespan(app: FastAPI):
     await create_super_admin()
     await init_redis()
+
+    from app.core.redis import redis_client  # fetched after init_redis() sets it
+    app.state.rate_limiter = TokenBucket(redis_client)
+    app.state.trust_x_forwarded_for = TRUST_X_FORWARDED_FOR
+
+
     yield
     await close_redis()
 

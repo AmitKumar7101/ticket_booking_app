@@ -8,8 +8,18 @@ RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID", "")
 RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "")
 RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
 
+
+
+
 def _env_bool(name: str, default: bool) -> bool:
     return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+# Set to true only if this app sits behind a reverse proxy that itself sets/overwrites
+# X-Forwarded-For (nginx, Render, Railway, an AWS ALB, Cloudflare). If direct connections
+# are possible, leave this false - otherwise a client can spoof any IP it wants and dodge
+# rate limits entirely.
+TRUST_X_FORWARDED_FOR = _env_bool("TRUST_X_FORWARDED_FOR", False)
 
 
 # --- Message queue (Celery + RabbitMQ) ---

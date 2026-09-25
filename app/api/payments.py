@@ -18,13 +18,17 @@ from app.models.core_models import (
 )
 from app.schemas.payments import PaymentOrderCreate, PaymentOrderOut, PaymentVerify
 from app.services.ticket_queue import enqueue_ticket_email
+from app.core.rate_limit import rate_limit_by_user
 
 
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
 
 
-@router.post("/create-order", response_model=PaymentOrderOut)
+@router.post("/create-order", response_model=PaymentOrderOut,dependencies=[Depends(rate_limit_by_user(
+        "create-order", capacity=10, refill_rate=10 / 60, user_dependency=get_current_user
+    ))],
+)
 async def create_order(
     order_in: PaymentOrderCreate,
     current_user: User = Depends(get_current_user),
@@ -165,7 +169,10 @@ async def finalize_successful_payment(
 
 
 
-@router.post("/verify", status_code=status.HTTP_200_OK)
+@router.post("/verify", status_code=status.HTTP_200_OK,dependencies=[Depends(rate_limit_by_user(
+        "verify", capacity=10, refill_rate=10 / 60, user_dependency=get_current_user
+    ))],  # 10 / min)
+    )
 async def verify_payment(
     verify_in: PaymentVerify,
     current_user: User = Depends(get_current_user),

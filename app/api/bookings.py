@@ -9,7 +9,7 @@ from app.models.core_models import User, Event, Seat, Booking, SeatStatus
 from app.schemas.booking import BookingCreate, BookingOut
 from app.core.redis import get_redis
 from pydantic import BaseModel
-
+from app.core.rate_limit import rate_limit_by_user
 
 
 router = APIRouter(prefix="/bookings", tags=["Bookings"])
@@ -20,11 +20,17 @@ class SeatLockRequest(BaseModel):
     seat_id: int
 
 
-@router.post("/lock", status_code=status.HTTP_200_OK)
+@router.post("/lock", status_code=status.HTTP_200_OK,
+              dependencies=[Depends(rate_limit_by_user(
+        "lock", capacity=10, refill_rate=10 / 60,
+              user_dependency=get_current_user
+                ))],  # 10 / min
+    )
 async def lock_seat(
         request: SeatLockRequest,
         current_user: User = Depends(get_current_user),
-        redis_client: redis.Redis = Depends(get_redis)
+        redis_client: redis.Redis = Depends(get_redis),
+
 ):
     """
     Temporarily holds a seat for 5 minutes using Redis.

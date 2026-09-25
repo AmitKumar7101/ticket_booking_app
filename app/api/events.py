@@ -6,11 +6,14 @@ from typing import List
 from app.core.database import get_db
 from app.models.core_models import Event, Seat
 from app.schemas.booking import EventCatalogOut, SeatOut
+from app.core.rate_limit import rate_limit
 
 router = APIRouter(prefix="/events", tags=["Catalog"])
 
 
-@router.get("", response_model=List[EventCatalogOut])
+@router.get("", response_model=List[EventCatalogOut],
+            dependencies=[Depends(rate_limit("events-list", capacity=60, refill_rate=60 / 60))],  # 60 / min
+)
 async def get_events(db: AsyncSession = Depends(get_db)):
     """
     Fetch the catalog of all scheduled events.
@@ -20,7 +23,9 @@ async def get_events(db: AsyncSession = Depends(get_db)):
     return events
 
 
-@router.get("/{event_id}/seats", response_model=List[SeatOut])
+@router.get("/{event_id}/seats", response_model=List[SeatOut],
+            dependencies=[Depends(rate_limit("events-seats", capacity=60, refill_rate=60 / 60))],  # 60 / min
+)
 async def get_event_seats(event_id: int, db: AsyncSession = Depends(get_db)):
     """
     Fetch the seat map for a specific event.

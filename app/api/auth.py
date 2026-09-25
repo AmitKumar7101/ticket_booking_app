@@ -7,11 +7,15 @@ from app.core.database import get_db
 from app.core.security import get_password_hash, verify_password, create_access_token
 from app.models.core_models import User
 from app.schemas.auth import UserCreate, Token
+from app.core.rate_limit import rate_limit
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 
-@router.post("/signup", response_model=Token, status_code=status.HTTP_201_CREATED)
+@router.post("/signup", response_model=Token,
+             status_code=status.HTTP_201_CREATED,
+             dependencies=[Depends(rate_limit("signup", capacity=3, refill_rate=3 / 3600))],  # 3 / hour
+             )
 async def signup(user_in: UserCreate, db: AsyncSession = Depends(get_db)):
     """
     Register a new user and return an access token.
@@ -40,7 +44,9 @@ async def signup(user_in: UserCreate, db: AsyncSession = Depends(get_db)):
     return {"access_token": access_token, "token_type": "bearer"}
 
 
-@router.post("/login", response_model=Token)
+@router.post("/login", response_model=Token,
+        dependencies=[Depends(rate_limit("login", capacity=5, refill_rate=5 / 300))],  # 5 / 5 min
+    )
 async def login(
         form_data: OAuth2PasswordRequestForm = Depends(),
         db: AsyncSession = Depends(get_db)
